@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily Hermes update + telegram-user plugin health check (Telegram alert on failure)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@SCRIPT@
+TimeoutStartSec=45min

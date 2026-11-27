@@ -5,6 +5,8 @@
 #   ./setup.sh --bridge-only only the tg-user-bridge daemon
 #   ./setup.sh --plugin-only only the Hermes side
 #   ./setup.sh --dry-run     print what would change, change nothing
+#   ./setup.sh --daily-update  also install the daily Hermes update + health check
+#                              (Telegram message to the owner if the plugin breaks)
 #
 # Guarantees: never overwrites an existing file, config key, plugin or systemd unit;
 # never touches ~/.hermes/.env; never disables your Telegram bot unless you say yes.
@@ -16,14 +18,15 @@ BRIDGE_HOME="${TG_USER_BRIDGE_HOME:-$HOME/.config/tg-user-bridge}"
 VENV="${TG_USER_BRIDGE_VENV:-$HOME/.local/share/tg-user-bridge/venv}"
 UNIT="$HOME/.config/systemd/user/tg-user-bridge.service"
 GITHUB_REPO="ryderrob/hermes-plugin-telegram-call"
-DO_BRIDGE=1 DO_PLUGIN=1 DRY=0
+DO_BRIDGE=1 DO_PLUGIN=1 DRY=0 DO_DAILY=0
 
 for arg in "$@"; do
   case "$arg" in
     --bridge-only) DO_PLUGIN=0 ;;
     --plugin-only) DO_BRIDGE=0 ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --daily-update) DO_DAILY=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -199,6 +202,33 @@ setup_plugin() {
   say "done. Restart the gateway to connect: hermes gateway restart"
 }
 
+# ---------------------------------------------------------------------------------- daily update
+setup_daily_update() {
+  say "daily Hermes update + plugin health check"
+  local script="$HOME/.local/bin/hermes-daily-update" dir="$HOME/.config/systemd/user"
+  if [ -e "$script" ]; then
+    skip "exists: $script"
+  else
+    run mkdir -p "$(dirname "$script")"
+    run install -m 755 "$REPO/scripts/hermes-daily-update" "$script"
+    ok "installed $script"
+  fi
+  if [ -e "$dir/hermes-daily-update.service" ] || [ -e "$dir/hermes-daily-update.timer" ]; then
+    skip "systemd units exist in $dir"
+  else
+    if [ "$DRY" = 0 ]; then
+      mkdir -p "$dir"
+      sed "s|@SCRIPT@|$script|" "$REPO/systemd/hermes-daily-update.service" > "$dir/hermes-daily-update.service"
+      cp "$REPO/systemd/hermes-daily-update.timer" "$dir/hermes-daily-update.timer"
+    fi
+    ok "wrote hermes-daily-update.service/.timer"
+  fi
+  run systemctl --user daemon-reload
+  run systemctl --user enable --now hermes-daily-update.timer
+  ok "runs daily at 04:30 (edit OnCalendar in the timer to change); test: $script --check-only / --test-alert"
+}
+
 [ "$DO_BRIDGE" = 1 ] && setup_bridge
 [ "$DO_PLUGIN" = 1 ] && setup_plugin
+[ "$DO_DAILY" = 1 ] && setup_daily_update
 exit 0

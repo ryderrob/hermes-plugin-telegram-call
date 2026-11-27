@@ -32,7 +32,7 @@ Requirements: Linux with systemd (user services), Python ≥ 3.11, `ffmpeg` (for
 ```bash
 git clone https://github.com/ryderrob/hermes-plugin-telegram-call
 cd hermes-plugin-telegram-call
-./setup.sh            # --dry-run to preview, --bridge-only / --plugin-only to split
+./setup.sh            # --dry-run to preview, --bridge-only / --plugin-only to split, --daily-update for auto-updates
 hermes gateway restart
 ```
 
@@ -51,6 +51,28 @@ What it does:
 6. It adds only the missing keys under `platforms.telegram_user` in `config.yaml`.
 
 Manual alternative: `hermes plugins install ryderrob/hermes-plugin-telegram-call --enable`, then run `~/.hermes/plugins/telegram-user/setup.sh --bridge-only`.
+
+## Daily update with health check (optional)
+
+`./setup.sh --daily-update` installs a timer that runs every day at 04:30:
+
+1. It updates Hermes (`hermes update --yes`).
+2. It checks that the plugin survived the update:
+   - plugin files are present
+   - `plugins validate` passes
+   - `plugins doctor` passes
+   - the plugin is still enabled
+   - the bridge service is running and healthy
+   - voice calls are still available
+   - the gateway reconnected the `telegram_user` platform
+   - the event stream to Hermes is open
+3. If any check fails, the owner gets a Telegram message listing each issue, the version change and a rollback command.
+
+```bash
+hermes-daily-update --check-only   # run the checks now, no update
+hermes-daily-update --test-alert   # send a sample failure message
+journalctl --user -u hermes-daily-update
+```
 
 ## Configuration
 

@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e bridge pytest
-      - run: bash -n setup.sh
+      - run: bash -n setup.sh && bash -n scripts/hermes-daily-update
       - run: pytest -q tests
