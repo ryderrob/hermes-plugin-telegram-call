@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram user-account bridge for Hermes (owns the Telegram session)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+# Optional: API keys for the voice-call endpoints (TG_BRIDGE_LLM_API_KEY=..., etc.)
+EnvironmentFile=-%h/.config/tg-user-bridge/env
+ExecStart=@VENV@/bin/tg-user-bridge serve
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

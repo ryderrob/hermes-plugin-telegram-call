@@ -1,0 +1,17 @@
+name: telegram-user
+label: Telegram (user account)
+kind: platform
+version: 1.0.0
+description: >
+  Run Hermes on a Telegram *user account* instead of a bot: chat, commands, files,
+  voice notes and two-way voice calls, through a local tg-user-bridge daemon that
+  owns the Telegram session. Only allowed users can talk to it; calls are taken
+  only from the owner, and in group voice chats only the owner's voice is heard.
+author: ryderrob
+license: MIT
+homepage: https://github.com/ryderrob/hermes-plugin-telegram-call
+tags: [telegram, userbot, calls, voice, platform]
+# Outbound client tools, importable in CLI/TUI processes too (tools.py).
+provides_tools:
+  - telegram_call
+  - telegram_call_status
