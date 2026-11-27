@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Hermes update + plugin check daily at 04:30 local time
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

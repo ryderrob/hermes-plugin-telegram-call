@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Daily Hermes update + telegram-user plugin health check.
+# On any failed check the owner gets a Telegram message (via tg-user-bridge /notify).
+# Runs from hermes-daily-update.timer; logs go to: journalctl --user -u hermes-daily-update
+#   --check-only   run the checks without updating
+#   --test-alert   send a sample failure message to Telegram and exit
+set -uo pipefail
+MODE="${1:-}"
+
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+VENV="${TG_USER_BRIDGE_VENV:-$HOME/.local/share/tg-user-bridge/venv}"
+HERMES="${HERMES_BIN:-$(command -v hermes 2>/dev/null || echo "$HERMES_HOME/hermes-agent/.hermes/bin/hermes")}"
+REPO="$HERMES_HOME/hermes-agent"
+PLUGIN="$HERMES_HOME/plugins/telegram-user"
+AGENT_LOG="$HERMES_HOME/logs/agent.log"
+# Bridge address and token come from the bridge's own config.
+read -r BRIDGE TOKEN_FILE < <("$VENV/bin/python" -c 'from tg_user_bridge import config
+c = config.load(); print(f"http://{c.host}:{c.port}", c.token_file)' 2>/dev/null \
+  || echo "http://127.0.0.1:7599 $HOME/.config/tg-user-bridge/token")
+CONNECT_WAIT_S=240
+
+issues=()
+fail() { issues+=("$1"); echo "FAIL: $1"; }
+pass() { echo "ok: $1"; }
+token() { cat "$TOKEN_FILE" 2>/dev/null; }
+bridge_get() { curl -fsS -m 10 -H "Authorization: Bearer $(token)" "$BRIDGE$1"; }
+
+notify() {  # $1 = text; retries once after restarting the bridge
+  local body
+  body="$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$1")"
+  for attempt in 1 2; do
+    if curl -fsS -m 30 -H "Authorization: Bearer $(token)" -H 'Content-Type: application/json' \
+         -d "$body" "$BRIDGE/notify" | grep -q '"text": true'; then
+      echo "telegram notification sent"; return 0
+    fi
+    [ "$attempt" = 1 ] && { systemctl --user restart tg-user-bridge; sleep 20; }
+  done
+  echo "ERROR: could not deliver the Telegram notification" >&2
+  return 1
+}
+
+if [ "$MODE" = "--test-alert" ]; then
+  notify "🧪 Test: this is how a failed Hermes update / plugin check will be reported."$'\n'"• example issue: plugins validate failed"
+  exit $?
+fi
+
+started_at="$(date '+%Y-%m-%d %H:%M:%S')"
+before="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+
+# ---- 1. update ---------------------------------------------------------------------------
+updated=0
+check_out="$("$HERMES" update --check 2>&1)"; echo "$check_out"
+if [ "$MODE" = "--check-only" ]; then
+  echo "== --check-only: not updating"
+elif grep -qi 'available' <<<"$check_out"; then
+  echo "== updating Hermes"
+  if "$HERMES" update --yes 2>&1 | tail -40; then
+    updated=1
+  else
+    fail "hermes update exited with an error (see journalctl --user -u hermes-daily-update)"
+  fi
+else
+  echo "== Hermes already up to date"
+fi
+after="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+version="$("$HERMES" --version 2>/dev/null | head -1)"
+
+# ---- 2. plugin checks --------------------------------------------------------------------
+[ -f "$PLUGIN/plugin.yaml" ] && [ -f "$PLUGIN/__init__.py" ] && pass "plugin files present" \
+  || fail "plugin files missing in $PLUGIN"
+
+out="$("$HERMES" plugins validate "$PLUGIN" 2>&1)"
+grep -q 'Validation passed' <<<"$out" && pass "plugins validate" \
+  || fail "plugins validate failed: $(grep -E '✗|FAIL|Error' <<<"$out" | head -3 | tr '\n' ' ')"
+
+out="$("$HERMES" plugins doctor "$PLUGIN" 2>&1)"
+grep -q 'OK:' <<<"$out" && pass "plugins doctor" \
+  || fail "plugins doctor failed: $(tail -3 <<<"$out" | tr '\n' ' ')"
+
+"$HERMES" plugins list 2>/dev/null | grep -E 'telegram-user' | grep -q 'enabled' && pass "plugin enabled" \
+  || fail "plugin telegram-user is not enabled (hermes plugins enable telegram-user)"
+
+# ---- 3. bridge -----------------------------------------------------------------------------
+systemctl --user -q is-active tg-user-bridge && pass "tg-user-bridge active" || fail "tg-user-bridge service is not running"
+health="$(bridge_get /api/health 2>/dev/null)"
+if [ -n "$health" ] && python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("ok") else 1)' "$health"; then
+  pass "bridge health"
+  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("calls") else 1)' "$health" \
+    && pass "voice calls available" || fail "bridge is up but voice calls are disabled: $(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("calls_error"))' "$health")"
+else
+  fail "bridge API not answering on $BRIDGE"
+fi
+
+# ---- 4. gateway connected through the plugin ---------------------------------------------
+systemctl --user -q is-active hermes-gateway && pass "hermes-gateway active" || fail "hermes-gateway service is not running"
+if [ "$updated" = 1 ]; then
+  # The update restarts the gateway: wait for the platform to come back after it.
+  since="$started_at"
+else
+  since=""
+fi
+connected=0
+for _ in $(seq 1 $((CONNECT_WAIT_S / 10))); do
+  if python3 - "$AGENT_LOG" "$since" <<'EOF'
+import sys
+log, since = sys.argv[1], sys.argv[2]
+lines = [l for l in open(log, errors="replace") if "telegram_user" in l and ("connected" in l or "bridge not reachable" in l or "Connecting to telegram_user" in l)]
+if since:
+    lines = [l for l in lines if l[:19] >= since]
+last = lines[-1] if lines else ""
+sys.exit(0 if "✓ telegram_user connected" in last or "telegram_user: connected" in last else 1)
+EOF
+  then connected=1; break; fi
+  [ -z "$since" ] && break  # no restart happened: the last state is what counts
+  sleep 10
+done
+[ "$connected" = 1 ] && pass "gateway connected to telegram_user" \
+  || fail "gateway did not (re)connect the telegram_user platform: $(grep -h 'telegram_user' "$AGENT_LOG" "$HOME/.hermes/logs/errors.log" 2>/dev/null | grep -viE 'capability_check|inbound message|conversation turn' | tail -2 | cut -c1-200 | tr '\n' ' ')"
+
+ss -tnp 2>/dev/null | grep -q "${BRIDGE#http://}.*\"hermes\"" && pass "event stream open" \
+  || fail "Hermes has no open connection to the bridge (incoming messages would not arrive)"
+
+# ---- 5. report -----------------------------------------------------------------------------
+if [ "${#issues[@]}" -gt 0 ]; then
+  msg="⚠️ Hermes daily update: telegram-user plugin check failed"$'\n'
+  msg+="Hermes: $before → $after${version:+ ($version)}"$'\n\n'
+  for i in "${issues[@]}"; do msg+="• $i"$'\n'; done
+  msg+=$'\n'"Logs: journalctl --user -u hermes-daily-update"
+  msg+=$'\n'"Rollback: git -C $REPO checkout $before"
+  notify "$msg"
+  exit 1
+fi
+echo "all checks passed (Hermes $before → $after)"
